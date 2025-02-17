@@ -1,0 +1,53 @@
+from pyspark.sql import SparkSession
+import logging
+
+# Set up configuration and logging
+logging.basicConfig(filename='comparison_report.log', level=logging.INFO, format='%(asctime)s - %(message)s')
+spark = SparkSession.builder.appName("CompareTables").enableHiveSupport().getOrCreate()
+
+def compare_tables(table1, table2):
+    # Read tables from Hive
+    df1 = spark.table(table1)
+    df2 = spark.table(table2)
+    
+    # Get columns common in both DataFrames
+    common_columns = [col for col in df1.columns if col in df2.columns]
+    
+    if not common_columns:
+        logging.info(f"No common columns to compare between {table1} and {table2}.")
+        return
+    
+    # Create DataFrames with common columns
+    df1_common = df1.select(common_columns)
+    df2_common = df2.select(common_columns)
+    
+    # Calculate counts
+    df1_count = df1_common.count()
+    df2_count = df2_common.count()
+    
+    # Compare counts
+    if df1_count == df2_count:
+        logging.info(f"Row counts match for tables {table1} and {table2}: {df1_count}")
+    else:
+        logging.info(f"Row counts mismatch - {table1}: {df1_count}, {table2}: {df2_count}")
+        
+    # Find matching and mismatching rows
+    matching_rows = df1_common.intersect(df2_common).count()
+    total_mismatching_rows = (df1_count + df2_count - 2 * matching_rows)
+    
+    # Logging the results
+    logging.info(f"Matching rows between {table1} and {table2}: {matching_rows}")
+    logging.info(f"Mismatching rows between {table1} and {table2}: {total_mismatching_rows}")
+
+# Example usage
+if __name__ == "__main__":
+    # List of Hive tables
+    source_tables = ['schema1.table1', 'schema1.table2']
+    target_tables = ['schema2.table1', 'schema2.table2']
+
+    # Assume tables are ordered correspondingly in source and target for comparison
+    for src, tgt in zip(source_tables, target_tables):
+        compare_tables(src, tgt)
+
+    # Stop the Spark session
+    spark.stop()
