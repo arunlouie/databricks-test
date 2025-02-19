@@ -6,36 +6,37 @@ import logging
 logging.basicConfig(filename='comparison_report.log', level=logging.INFO, format='%(asctime)s - %(message)s')
 spark = SparkSession.builder.appName("CompareTables").enableHiveSupport().getOrCreate()
 
-def harmonize_data_types(df1, df2):
-    # Adjust df2's column data types to match df1
+def harmonize_data_types(df1, df2, ignore_columns):
+    # Adjust df2's column data types to match df1, excluding ignored columns
     for column_name in df1.schema.names:
-        if column_name in df2.schema.names:
+        if column_name in df2.schema.names and column_name not in ignore_columns:
             df2 = df2.withColumn(column_name, col(column_name).cast(df1.schema[column_name].dataType))
     return df2
 
-def compare_tables(table1, table2, primary_keys):
+def compare_tables(table1, table2, primary_keys, ignore_columns):
     # Read tables from Hive
     df1 = spark.table(table1)
     df2 = spark.table(table2)
 
-    # Check if primary key columns and column names exist in both tables
-    missing_keys = [key for key in primary_keys if key not in df1.columns or key not in df2.columns]
+    # Check if primary key columns and column names exist in both tables, excluding ignored columns
+    relevant_keys = [key for key in primary_keys if key not in ignore_columns]
+    missing_keys = [key for key in relevant_keys if key not in df1.columns or key not in df2.columns]
     if missing_keys:
         logging.info(f"Missing primary key columns {missing_keys} in tables {table1} or {table2}.")
         return
     
-    # Harmonize data types of df2 to match df1
-    df2 = harmonize_data_types(df1, df2)
+    # Harmonize data types of df2 to match df1, ignoring specified columns
+    df2 = harmonize_data_types(df1, df2, ignore_columns)
 
     # Join DataFrames on primary keys
-    joined_df = df1.join(df2, primary_keys, "full_outer")
+    joined_df = df1.join(df2, relevant_keys, "full_outer")
     
-    # Define mismatch condition based on columns which are not part of the primary key
-    common_cols = [col for col in df1.columns if col in df2.columns and col not in primary_keys]
+    # Define mismatch condition based on columns which are not part of the primary key or ignored
+    common_cols = [col for col in df1.columns if col in df2.columns and col not in relevant_keys + ignore_columns]
     condition = " OR ".join([f"df1.{col} != df2.{col}" for col in common_cols])
     
     # Filter matches and mismatches
-    matches = joined_df.filter(condition == "").select([f"df1.{col}" for col in df1.columns])
+    matches = joined_df.filter(condition == "").select([f"df1.{col}" for col in df1.columns if col not in ignore_columns])
     mismatches = joined_df.filter(condition)
     
     # Count matching and mismatching rows
@@ -48,15 +49,15 @@ def compare_tables(table1, table2, primary_keys):
 
 # Example usage
 if __name__ == "__main__":
-    # List of Hive tables and their composite primary keys
+    # List of Hive tables, their composite primary keys, and ignored columns
     tables = [
-        ('schema1.table1', 'schema2.table1', ['id']),
-        ('schema1.table2', 'schema2.table2', ['user_id', 'transaction_id'])
+        ('schema1.table1', 'schema2.table1', ['id'], ['last_modified']),
+        ('schema1.table2', 'schema2.table2', ['user_id', 'transaction_id'], ['timestamp', 'status'])
     ]
 
     # Compare tables
-    for src, tgt, keys in tables:
-        compare_tables(src, tgt, keys)
+    for src, tgt, keys, ignore in tables:
+        compare_tables(src, tgt, keys, ignore)
 
     # Stop the Spark session
     spark.stop()
