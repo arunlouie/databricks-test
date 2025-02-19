@@ -1,53 +1,62 @@
 from pyspark.sql import SparkSession
+from pyspark.sql.functions import col
 import logging
 
 # Set up configuration and logging
 logging.basicConfig(filename='comparison_report.log', level=logging.INFO, format='%(asctime)s - %(message)s')
 spark = SparkSession.builder.appName("CompareTables").enableHiveSupport().getOrCreate()
 
-def compare_tables(table1, table2):
+def harmonize_data_types(df1, df2):
+    # Adjust df2's column data types to match df1
+    for column_name in df1.schema.names:
+        if column_name in df2.schema.names:
+            df2 = df2.withColumn(column_name, col(column_name).cast(df1.schema[column_name].dataType))
+    return df2
+
+def compare_tables(table1, table2, primary_keys):
     # Read tables from Hive
     df1 = spark.table(table1)
     df2 = spark.table(table2)
-    
-    # Get columns common in both DataFrames
-    common_columns = [col for col in df1.columns if col in df2.columns]
-    
-    if not common_columns:
-        logging.info(f"No common columns to compare between {table1} and {table2}.")
+
+    # Check if primary key columns and column names exist in both tables
+    missing_keys = [key for key in primary_keys if key not in df1.columns or key not in df2.columns]
+    if missing_keys:
+        logging.info(f"Missing primary key columns {missing_keys} in tables {table1} or {table2}.")
         return
     
-    # Create DataFrames with common columns
-    df1_common = df1.select(common_columns)
-    df2_common = df2.select(common_columns)
+    # Harmonize data types of df2 to match df1
+    df2 = harmonize_data_types(df1, df2)
+
+    # Join DataFrames on primary keys
+    joined_df = df1.join(df2, primary_keys, "full_outer")
     
-    # Calculate counts
-    df1_count = df1_common.count()
-    df2_count = df2_common.count()
+    # Define mismatch condition based on columns which are not part of the primary key
+    common_cols = [col for col in df1.columns if col in df2.columns and col not in primary_keys]
+    condition = " OR ".join([f"df1.{col} != df2.{col}" for col in common_cols])
     
-    # Compare counts
-    if df1_count == df2_count:
-        logging.info(f"Row counts match for tables {table1} and {table2}: {df1_count}")
-    else:
-        logging.info(f"Row counts mismatch - {table1}: {df1_count}, {table2}: {df2_count}")
-        
-    # Find matching and mismatching rows
-    matching_rows = df1_common.intersect(df2_common).count()
-    total_mismatching_rows = (df1_count + df2_count - 2 * matching_rows)
+    # Filter matches and mismatches
+    matches = joined_df.filter(condition == "").select([f"df1.{col}" for col in df1.columns])
+    mismatches = joined_df.filter(condition)
     
-    # Logging the results
-    logging.info(f"Matching rows between {table1} and {table2}: {matching_rows}")
-    logging.info(f"Mismatching rows between {table1} and {table2}: {total_mismatching_rows}")
+    # Count matching and mismatching rows
+    match_count = matches.count()
+    mismatch_count = mismatches.count()
+    
+    # Logging results
+    logging.info(f"Matching rows between {table1} and {table2}: {match_count}")
+    logging.info(f"Mismatching rows between {table1} and {table2}: {mismatch_count}")
 
 # Example usage
 if __name__ == "__main__":
-    # List of Hive tables
-    source_tables = ['schema1.table1', 'schema1.table2']
-    target_tables = ['schema2.table1', 'schema2.table2']
+    # List of Hive tables and their composite primary keys
+    tables = [
+        ('schema1.table1', 'schema2.table1', ['id']),
+        ('schema1.table2', 'schema2.table2', ['user_id', 'transaction_id'])
+    ]
 
-    # Assume tables are ordered correspondingly in source and target for comparison
-    for src, tgt in zip(source_tables, target_tables):
-        compare_tables(src, tgt)
+    # Compare tables
+    for src, tgt, keys in tables:
+        compare_tables(src, tgt, keys)
 
     # Stop the Spark session
     spark.stop()
