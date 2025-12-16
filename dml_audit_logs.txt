@@ -1,0 +1,134 @@
+Example: DDL + DML only, all objects
+
+SELECT
+  event_time,
+  user_identity.email                  AS user_email,
+  service_name,
+  action_name,
+  request_params.full_name_arg         AS object_full_name,
+  request_params.commandText           AS sql_text
+FROM system.access.audit
+WHERE
+  -- DDL actions from Unity Catalog APIs
+  (
+    service_name = 'unityCatalog'
+    AND action_name IN ('createTable','deleteTable','updateTable','alterTable')
+  )
+  OR
+  -- Any SQL statement that is clearly DDL or DML
+  (
+    service_name = 'sqlCompute'
+    AND action_name IN ('commandSubmit','commandFinish')
+    AND lower(trim(request_params.commandText)) RLIKE '^(select|insert|update|delete|merge|create|alter|drop)\\b'
+  )
+ORDER BY event_time DESC;
+
+
+Example: DDL + DML for one table
+SELECT
+  event_time,
+  user_identity.email          AS user_email,
+  service_name,
+  action_name,
+  request_params.full_name_arg AS object_full_name,
+  request_params.commandText   AS sql_text
+FROM system.access.audit
+WHERE
+  -- focus on a specific table
+  request_params.full_name_arg = 'main.sales.orders'
+  AND (
+    (
+      service_name = 'unityCatalog'
+      AND action_name IN ('createTable','deleteTable','updateTable','alterTable')
+    )
+    OR
+    (
+      service_name = 'sqlCompute'
+      AND action_name IN ('commandSubmit','commandFinish')
+      AND lower(trim(request_params.commandText)) RLIKE '^(select|insert|update|delete|merge|create|alter|drop)\\b'
+    )
+  )
+ORDER BY event_time DESC;
+
+
+
+
+
+
+SELECT
+  event_time,
+  user_identity.email        AS user_email,
+  action_name,
+  request_params.full_name_arg AS object_full_name,
+  request_params.commandText AS ddl_sql
+FROM system.access.audit
+WHERE service_name = 'unityCatalog'
+  AND request_params.full_name_arg = 'main.sales.orders'
+  AND action_name IN ('createTable', 'deleteTable', 'updateTable', 'alterTable')
+  AND event_time >= now() - INTERVAL 30 DAY
+ORDER BY event_time DESC;
+
+
+
+SELECT
+  event_time,
+  user_identity.email        AS user_email,
+  action_name,
+  request_params.full_name_arg AS object_full_name,
+  request_params.commandText AS sql_text
+FROM system.access.audit
+WHERE service_name = 'sqlCompute'
+  AND request_params.full_name_arg = 'main.sales.orders'
+  AND action_name IN ('commandSubmit','commandFinish')
+  AND lower(request_params.commandText) RLIKE '^(select|insert|update|delete|merge) '
+  AND event_time >= now() - INTERVAL 30 DAY
+ORDER BY event_time DESC;
+
+
+SELECT *
+FROM system.query.history
+WHERE object_name = 'main.sales.orders'
+  AND statement_type IN ('SELECT','INSERT','UPDATE','DELETE','MERGE')
+  AND start_time >= now() - INTERVAL 30 DAY;
+
+
+
+COMBINED:
+
+CREATE OR REPLACE VIEW governance.uc_table_audit AS
+SELECT
+  event_time,
+  user_identity.email        AS user_email,
+  request_params.full_name_arg AS object_full_name,
+  CASE
+    WHEN action_name IN ('createTable','deleteTable','updateTable','alterTable') THEN 'DDL'
+    WHEN action_name IN ('commandSubmit','commandFinish')
+         AND lower(request_params.commandText) RLIKE '^(insert|update|delete|merge) ' THEN 'DML_WRITE'
+    WHEN action_name IN ('commandSubmit','commandFinish')
+         AND lower(request_params.commandText) LIKE 'select %' THEN 'DML_READ'
+    ELSE 'OTHER'
+  END AS event_type,
+  action_name,
+  request_params.commandText AS sql_text
+FROM system.access.audit
+WHERE service_name IN ('unityCatalog','sqlCompute');
+
+
+
+Query output:
+
+SELECT *
+FROM governance.uc_table_audit
+WHERE object_full_name = 'main.sales.orders'
+  AND event_type IN ('DDL','DML_WRITE','DML_READ')
+  AND event_time >= now() - INTERVAL 30 DAY
+ORDER BY event_time DESC;
+
+
+service_name = 'sqlCompute'
+AND action_name IN ('commandSubmit','commandFinish')
+AND lower(trim(request_params.commandText)) RLIKE '^(select|insert|update|delete|merge|create|alter|drop)\\b'
+
+
+
+
