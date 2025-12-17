@@ -132,3 +132,60 @@ AND lower(trim(request_params.commandText)) RLIKE '^(select|insert|update|delete
 
 
 
+
+
+
+
+SELECT
+  h.statement_id,
+  h.user_name,
+  h.statement_type,              -- includes SELECT, INSERT, UPDATE, etc.
+  t.source_table_full_name,
+  t.target_table_full_name,
+  h.client_application,          -- notebook, Databricks SQL, Power BI, etc.
+  h.start_time,
+  h.end_time,
+  h.statement_text
+FROM system.query.history h
+JOIN system.access.table_lineage t
+  ON t.statement_id = h.cache_origin_statement_id
+WHERE
+  (
+    t.source_table_full_name = 'catalog.schema.table_name'
+    OR t.target_table_full_name = 'catalog.schema.table_name'
+  )
+  AND h.statement_type IN (
+    'SELECT',
+    'INSERT', 'UPDATE', 'DELETE', 'MERGE',
+    'CREATE', 'ALTER', 'DROP', 'TRUNCATE'
+  )
+ORDER BY h.start_time DESC;
+
+
+
+WITH exports AS (
+  SELECT
+    event_time,
+    user_identity.email        AS user_email,
+    action_name,
+    request_params.statement_id AS statement_id
+  FROM system.access.audit
+  WHERE action_name IN ('downloadQueryResult','downloadPreviewResults','downloadLargeResults')
+)
+SELECT
+  e.event_time,
+  e.user_email,
+  e.action_name,
+  h.statement_type,
+  h.client_application,
+  h.statement_text,
+  l.source_table_full_name,
+  l.target_table_full_name
+FROM exports e
+JOIN system.query.history h
+  ON h.statement_id = e.statement_id
+LEFT JOIN system.access.table_lineage l
+  ON l.statement_id = h.cache_origin_statement_id
+ORDER BY e.event_time DESC;
+
+
