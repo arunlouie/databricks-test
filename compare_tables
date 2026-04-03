@@ -1,63 +1,46 @@
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import col
-import logging
-
-# Set up configuration and logging
-logging.basicConfig(filename='comparison_report.log', level=logging.INFO, format='%(asctime)s - %(message)s')
-spark = SparkSession.builder.appName("CompareTables").enableHiveSupport().getOrCreate()
-
-def harmonize_data_types(df1, df2, ignore_columns):
-    # Adjust df2's column data types to match df1, excluding ignored columns
-    for column_name in df1.schema.names:
-        if column_name in df2.schema.names and column_name not in ignore_columns:
-            df2 = df2.withColumn(column_name, col(column_name).cast(df1.schema[column_name].dataType))
-    return df2
-
-def compare_tables(table1, table2, primary_keys, ignore_columns):
-    # Read tables from Hive
-    df1 = spark.table(table1)
-    df2 = spark.table(table2)
-
-    # Check if primary key columns and column names exist in both tables, excluding ignored columns
-    relevant_keys = [key for key in primary_keys if key not in ignore_columns]
-    missing_keys = [key for key in relevant_keys if key not in df1.columns or key not in df2.columns]
-    if missing_keys:
-        logging.info(f"Missing primary key columns {missing_keys} in tables {table1} or {table2}.")
-        return
-    
-    # Harmonize data types of df2 to match df1, ignoring specified columns
-    df2 = harmonize_data_types(df1, df2, ignore_columns)
-
-    # Join DataFrames on primary keys
-    joined_df = df1.join(df2, relevant_keys, "full_outer")
-    
-    # Define mismatch condition based on columns which are not part of the primary key or ignored
-    common_cols = [col for col in df1.columns if col in df2.columns and col not in relevant_keys + ignore_columns]
-    condition = " OR ".join([f"df1.{col} != df2.{col}" for col in common_cols])
-    
-    # Filter matches and mismatches
-    matches = joined_df.filter(condition == "").select([f"df1.{col}" for col in df1.columns if col not in ignore_columns])
-    mismatches = joined_df.filter(condition)
-    
-    # Count matching and mismatching rows
-    match_count = matches.count()
-    mismatch_count = mismatches.count()
-    
-    # Logging results
-    logging.info(f"Matching rows between {table1} and {table2}: {match_count}")
-    logging.info(f"Mismatching rows between {table1} and {table2}: {mismatch_count}")
-
-# Example usage
-if __name__ == "__main__":
-    # List of Hive tables, their composite primary keys, and ignored columns
-    tables = [
-        ('schema1.table1', 'schema2.table1', ['id'], ['last_modified']),
-        ('schema1.table2', 'schema2.table2', ['user_id', 'transaction_id'], ['timestamp', 'status'])
-    ]
-
-    # Compare tables
-    for src, tgt, keys, ignore in tables:
-        compare_tables(src, tgt, keys, ignore)
-
-    # Stop the Spark session
-    spark.stop()
+WITH warehouse_costs AS (
+  -- Step 1: Get total DBU consumption per warehouse per day
+  SELECT 
+    usage_date,
+    usage_metadata.warehouse_id,
+    SUM(usage_quantity) as total_dbus
+  FROM system.billing.usage
+  WHERE billing_origin_product = 'SQL'
+    AND usage_date >= CURRENT_DATE - INTERVAL 30 DAYS
+  GROUP BY 1, 2
+),
+user_query_activity AS (
+  -- Step 2: Get total query duration per user per warehouse per day
+  -- Note: This uses the Query History system table
+  SELECT 
+    DATE(total_duration_ms) as usage_date,
+    warehouse_id,
+    executed_by as user_email,
+    SUM(total_duration_ms) as user_total_duration
+  FROM system.query_analytics.query_history
+  WHERE executed_by = 'user@example.com' -- <--- Filter specific user here
+    AND start_time >= CURRENT_DATE - INTERVAL 30 DAYS
+  GROUP BY 1, 2, 3
+),
+total_warehouse_activity AS (
+  -- Step 3: Get total duration for ALL users to calculate the ratio
+  SELECT 
+    DATE(start_time) as usage_date,
+    warehouse_id,
+    SUM(total_duration_ms) as global_total_duration
+  FROM system.query_analytics.query_history
+  WHERE start_time >= CURRENT_DATE - INTERVAL 30 DAYS
+  GROUP BY 1, 2
+)
+-- Step 4: Combine to find the attributed DBUs
+SELECT 
+  u.usage_date,
+  u.user_email,
+  u.warehouse_id,
+  (u.user_total_duration / t.global_total_duration) * w.total_dbus as attributed_dbus
+FROM user_query_activity u
+JOIN total_warehouse_activity t 
+  ON u.usage_date = t.usage_date AND u.warehouse_id = t.warehouse_id
+JOIN warehouse_costs w 
+  ON u.usage_date = w.usage_date AND u.warehouse_id = w.warehouse_id
+ORDER BY u.usage_date DESC;
